@@ -54,9 +54,7 @@ int rtos_thread_packet(struct connection *connection, const char *packet, int pa
 #define PAGING_QUEUE_NUM 0
 #endif /* CONFIG_PAGING */
 
-
 #define TASK_QUEUE_NUM (6 + SIG_QUEUE_NUM + M_QUEUE_NUM + PAGING_QUEUE_NUM)
-
 
 /* see nuttx/sched/os_start.c */
 static char *nuttx_symbol_list[] = {
@@ -69,7 +67,7 @@ static char *nuttx_symbol_list[] = {
 struct tcb {
 	uint32_t flink;
 	uint32_t blink;
-	uint8_t  dat[512];
+	uint8_t  dat[256];
 };
 
 static struct {
@@ -98,10 +96,10 @@ static char *task_state_str[] = {
 
 /* see arch/arm/include/armv7-m/irq_cmnvector.h */
 static const struct stack_register_offset nuttx_stack_offsets_cortex_m[] = {
-	{ ARMV7M_R0,	0x28, 32 },		/* r0   */
-	{ ARMV7M_R1,	0x2c, 32 },		/* r1   */
-	{ ARMV7M_R2,	0x30, 32 },		/* r2   */
-	{ ARMV7M_R3,	0x34, 32 },		/* r3   */
+	{ ARMV7M_R0,	0x2c, 32 },		/* r0   */
+	{ ARMV7M_R1,	0x30, 32 },		/* r1   */
+	{ ARMV7M_R2,	0x34, 32 },		/* r2   */
+	{ ARMV7M_R3,	0x38, 32 },		/* r3   */
 	{ ARMV7M_R4,	0x08, 32 },		/* r4   */
 	{ ARMV7M_R5,	0x0c, 32 },		/* r5   */
 	{ ARMV7M_R6,	0x10, 32 },		/* r6   */
@@ -110,19 +108,18 @@ static const struct stack_register_offset nuttx_stack_offsets_cortex_m[] = {
 	{ ARMV7M_R9,	0x1c, 32 },		/* r9   */
 	{ ARMV7M_R10,	0x20, 32 },		/* r10  */
 	{ ARMV7M_R11,	0x24, 32 },		/* r11  */
-	{ ARMV7M_R12,	0x38, 32 },		/* r12  */
+	{ ARMV7M_R12,	0x3c, 32 },		/* r12  */
 	{ ARMV7M_R13,	  0,  32 },		/* sp   */
-	{ ARMV7M_R14,	0x3c, 32 },		/* lr   */
-	{ ARMV7M_PC,	0x40, 32 },		/* pc   */
-	{ ARMV7M_xPSR,	0x44, 32 },		/* xPSR */
+	{ ARMV7M_R14,	0x40, 32 },		/* lr   */
+	{ ARMV7M_PC,	0x44, 32 },		/* pc   */
+	{ ARMV7M_xPSR,	0x48, 32 },		/* xPSR */
 };
 
-
 static const struct rtos_register_stacking nuttx_stacking_cortex_m = {
-	0x48,                                   /* stack_registers_size */
-	-1,                                     /* stack_growth_direction */
-	17,                                     /* num_output_registers */
-	0,                                      /* stack_alignment */
+	0x4c,                          /* stack_registers_size */
+	-1,                            /* stack_growth_direction */
+	17,                            /* num_output_registers */
+	0,                             /* stack_alignment */
 	nuttx_stack_offsets_cortex_m   /* register_offsets */
 };
 
@@ -376,8 +373,23 @@ static int nuttx_get_thread_reg_list(struct rtos *rtos, int64_t thread_id,
 	else
 		stacking = &nuttx_stacking_cortex_m;
 
-	return rtos_generic_stack_read(rtos->target, stacking,
-	    (uint32_t)thread_id + xcpreg_offset, reg_list, num_regs);
+	uint32_t addr;
+	if ((name_offset - xcpreg_offset) == 4) {
+		/* The stack frame storage has been changed in the latest NuttX.
+		 * If the size is 4, it is 32 bit address, so we need to read actual stack frame
+		 * address from xcpreg_offset.
+		 */
+		retval = target_read_u32(rtos->target, (uint32_t)thread_id + xcpreg_offset, &addr);
+		if (retval != ERROR_OK) {
+			LOG_ERROR("Obtaining frame address");
+			return -1;
+		}
+	} else {
+		/* Old kernel's stack frame is in struct tcb_s */
+		addr = (uint32_t)thread_id + xcpreg_offset;
+	}
+
+	return rtos_generic_stack_read(rtos->target, stacking, addr, reg_list, num_regs);
 }
 
 static int nuttx_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
