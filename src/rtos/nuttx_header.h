@@ -53,7 +53,7 @@ end
 
 /* defconfig of nuttx */
 /* #define CONFIG_DISABLE_SIGNALS */
-#define CONFIG_DISABLE_MQUEUE
+/* #define CONFIG_DISABLE_MQUEUE */
 /* #define CONFIG_PAGING */
 
 
