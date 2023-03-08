@@ -1286,11 +1286,15 @@ int cortex_m_set_breakpoint(struct target *target, struct breakpoint *breakpoint
 		LOG_DEBUG("fpc_num %i fpcr_value 0x%" PRIx32 "",
 			fp_num,
 			comparator_list[fp_num].fpcr_value);
+		if (!cortex_m->fpb_enabled) {
+			LOG_DEBUG("FPB wasn't enabled, do it now");
+			retval = cortex_m_enable_fpb(target);
+			if (retval != ERROR_OK) {
+				LOG_ERROR("Failed to enable the FPB");
+				return retval;
+			}
 
-		retval = cortex_m_enable_fpb(target);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Failed to enable the FPB");
-			return retval;
+			cortex_m->fpb_enabled = true;
 		}
 	} else if (breakpoint->type == BKPT_SOFT) {
 		uint8_t code[4];
