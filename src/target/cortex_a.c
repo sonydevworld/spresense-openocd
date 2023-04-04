@@ -425,6 +425,27 @@ static int cortex_a_instr_write_data_dcc(struct arm_dpm *dpm,
 			&dscr);
 }
 
+static int cortex_a_instr_write_data_rt_dcc(struct arm_dpm *dpm,
+	uint8_t rt, uint32_t data)
+{
+	struct cortex_a_common *a = dpm_to_a(dpm);
+	uint32_t dscr = DSCR_INSTR_COMP;
+	int retval;
+
+	if (rt > 15)
+		return ERROR_TARGET_INVALID;
+
+	retval = cortex_a_write_dcc(a, data);
+	if (retval != ERROR_OK)
+		return retval;
+
+	/* DCCRX to Rt, "MCR p14, 0, R0, c0, c5, 0", 0xEE000E15 */
+	return cortex_a_exec_opcode(
+			a->armv7a_common.arm.target,
+			ARMV4_5_MRC(14, 0, rt, 0, 5, 0),
+			&dscr);
+}
+
 static int cortex_a_instr_write_data_r0(struct arm_dpm *dpm,
 	uint32_t opcode, uint32_t data)
 {
@@ -432,15 +453,7 @@ static int cortex_a_instr_write_data_r0(struct arm_dpm *dpm,
 	uint32_t dscr = DSCR_INSTR_COMP;
 	int retval;
 
-	retval = cortex_a_write_dcc(a, data);
-	if (retval != ERROR_OK)
-		return retval;
-
-	/* DCCRX to R0, "MCR p14, 0, R0, c0, c5, 0", 0xEE000E15 */
-	retval = cortex_a_exec_opcode(
-			a->armv7a_common.arm.target,
-			ARMV4_5_MRC(14, 0, 0, 0, 5, 0),
-			&dscr);
+	retval = cortex_a_instr_write_data_rt_dcc(dpm, 0, data);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -482,6 +495,25 @@ static int cortex_a_instr_read_data_dcc(struct arm_dpm *dpm,
 	return cortex_a_read_dcc(a, data, &dscr);
 }
 
+static int cortex_a_instr_read_data_rt_dcc(struct arm_dpm *dpm,
+	uint8_t rt, uint32_t *data)
+{
+	struct cortex_a_common *a = dpm_to_a(dpm);
+	uint32_t dscr = DSCR_INSTR_COMP;
+	int retval;
+
+	if (rt > 15)
+		return ERROR_TARGET_INVALID;
+
+	retval = cortex_a_exec_opcode(
+			a->armv7a_common.arm.target,
+			ARMV4_5_MCR(14, 0, rt, 0, 5, 0),
+			&dscr);
+	if (retval != ERROR_OK)
+		return retval;
+
+	return cortex_a_read_dcc(a, data, &dscr);
+}
 
 static int cortex_a_instr_read_data_r0(struct arm_dpm *dpm,
 	uint32_t opcode, uint32_t *data)
@@ -499,14 +531,7 @@ static int cortex_a_instr_read_data_r0(struct arm_dpm *dpm,
 		return retval;
 
 	/* write R0 to DCC */
-	retval = cortex_a_exec_opcode(
-			a->armv7a_common.arm.target,
-			ARMV4_5_MCR(14, 0, 0, 0, 5, 0),
-			&dscr);
-	if (retval != ERROR_OK)
-		return retval;
-
-	return cortex_a_read_dcc(a, data, &dscr);
+	return cortex_a_instr_read_data_rt_dcc(dpm, 0, data);
 }
 
 static int cortex_a_bpwp_enable(struct arm_dpm *dpm, unsigned index_t,
@@ -816,7 +841,7 @@ static int cortex_a_internal_restore(struct target *target, int current,
 			LOG_ERROR("How do I resume into Jazelle state??");
 			return ERROR_FAIL;
 		case ARM_STATE_AARCH64:
-			LOG_ERROR("Shoudn't be in AARCH64 state");
+			LOG_ERROR("Shouldn't be in AARCH64 state");
 			return ERROR_FAIL;
 	}
 	LOG_DEBUG("resume pc = 0x%08" PRIx32, resume_pc);
@@ -1090,7 +1115,8 @@ static int cortex_a_post_debug_entry(struct target *target)
 	return ERROR_OK;
 }
 
-int cortex_a_set_dscr_bits(struct target *target, unsigned long bit_mask, unsigned long value)
+static int cortex_a_set_dscr_bits(struct target *target,
+		unsigned long bit_mask, unsigned long value)
 {
 	struct armv7a_common *armv7a = target_to_armv7a(target);
 	uint32_t dscr;
@@ -1655,10 +1681,10 @@ static int cortex_a_assert_reset(struct target *target)
 		 */
 
 		/*
-		 * FIXME: fix reset when transport is SWD. This is a temporary
+		 * FIXME: fix reset when transport is not JTAG. This is a temporary
 		 * work-around for release v0.10 that is not intended to stay!
 		 */
-		if (transport_is_swd() ||
+		if (!transport_is_jtag() ||
 				(target->reset_halt && (jtag_get_reset_config() & RESET_SRST_NO_GATING)))
 			adapter_assert_reset();
 
@@ -1678,6 +1704,7 @@ static int cortex_a_assert_reset(struct target *target)
 
 static int cortex_a_deassert_reset(struct target *target)
 {
+	struct armv7a_common *armv7a = target_to_armv7a(target);
 	int retval;
 
 	LOG_DEBUG(" ");
@@ -1696,7 +1723,8 @@ static int cortex_a_deassert_reset(struct target *target)
 			LOG_WARNING("%s: ran after reset and before halt ...",
 				target_name(target));
 			if (target_was_examined(target)) {
-				retval = target_halt(target);
+				retval = mem_ap_write_atomic_u32(armv7a->debug_ap,
+						armv7a->debug_base + CPUDBG_DRCR, DRCR_HALT);
 				if (retval != ERROR_OK)
 					return retval;
 			} else
@@ -1893,7 +1921,8 @@ static int cortex_a_write_cpu_memory_slow(struct target *target,
 {
 	/* Writes count objects of size size from *buffer. Old value of DSCR must
 	 * be in *dscr; updated to new value. This is slow because it works for
-	 * non-word-sized objects and (maybe) unaligned accesses. If size == 4 and
+	 * non-word-sized objects. Avoid unaligned accesses as they do not work
+	 * on memory address space without "Normal" attribute. If size == 4 and
 	 * the address is aligned, cortex_a_write_cpu_memory_fast should be
 	 * preferred.
 	 * Preconditions:
@@ -2050,7 +2079,22 @@ static int cortex_a_write_cpu_memory(struct target *target,
 		/* We are doing a word-aligned transfer, so use fast mode. */
 		retval = cortex_a_write_cpu_memory_fast(target, count, buffer, &dscr);
 	} else {
-		/* Use slow path. */
+		/* Use slow path. Adjust size for aligned accesses */
+		switch (address % 4) {
+			case 1:
+			case 3:
+				count *= size;
+				size = 1;
+				break;
+			case 2:
+				if (size == 4) {
+					count *= 2;
+					size = 2;
+				}
+			case 0:
+			default:
+				break;
+		}
 		retval = cortex_a_write_cpu_memory_slow(target, size, count, buffer, &dscr);
 	}
 
@@ -2136,7 +2180,8 @@ static int cortex_a_read_cpu_memory_slow(struct target *target,
 {
 	/* Reads count objects of size size into *buffer. Old value of DSCR must be
 	 * in *dscr; updated to new value. This is slow because it works for
-	 * non-word-sized objects and (maybe) unaligned accesses. If size == 4 and
+	 * non-word-sized objects. Avoid unaligned accesses as they do not work
+	 * on memory address space without "Normal" attribute. If size == 4 and
 	 * the address is aligned, cortex_a_read_cpu_memory_fast should be
 	 * preferred.
 	 * Preconditions:
@@ -2352,7 +2397,23 @@ static int cortex_a_read_cpu_memory(struct target *target,
 		/* We are doing a word-aligned transfer, so use fast mode. */
 		retval = cortex_a_read_cpu_memory_fast(target, count, buffer, &dscr);
 	} else {
-		/* Use slow path. */
+		/* Use slow path. Adjust size for aligned accesses */
+		switch (address % 4) {
+			case 1:
+			case 3:
+				count *= size;
+				size = 1;
+				break;
+			case 2:
+				if (size == 4) {
+					count *= 2;
+					size = 2;
+				}
+				break;
+			case 0:
+			default:
+				break;
+		}
 		retval = cortex_a_read_cpu_memory_slow(target, size, count, buffer, &dscr);
 	}
 
@@ -2438,7 +2499,7 @@ static int cortex_a_read_phys_memory(struct target *target,
 	if (!count || !buffer)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	LOG_DEBUG("Reading memory at real address " TARGET_ADDR_FMT "; size %" PRId32 "; count %" PRId32,
+	LOG_DEBUG("Reading memory at real address " TARGET_ADDR_FMT "; size %" PRIu32 "; count %" PRIu32,
 		address, size, count);
 
 	/* read memory through the CPU */
@@ -2455,7 +2516,7 @@ static int cortex_a_read_memory(struct target *target, target_addr_t address,
 	int retval;
 
 	/* cortex_a handles unaligned memory access */
-	LOG_DEBUG("Reading memory at address " TARGET_ADDR_FMT "; size %" PRId32 "; count %" PRId32,
+	LOG_DEBUG("Reading memory at address " TARGET_ADDR_FMT "; size %" PRIu32 "; count %" PRIu32,
 		address, size, count);
 
 	cortex_a_prep_memaccess(target, 0);
@@ -2474,7 +2535,7 @@ static int cortex_a_write_phys_memory(struct target *target,
 	if (!count || !buffer)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	LOG_DEBUG("Writing memory to real address " TARGET_ADDR_FMT "; size %" PRId32 "; count %" PRId32,
+	LOG_DEBUG("Writing memory to real address " TARGET_ADDR_FMT "; size %" PRIu32 "; count %" PRIu32,
 		address, size, count);
 
 	/* write memory through the CPU */
@@ -2491,7 +2552,7 @@ static int cortex_a_write_memory(struct target *target, target_addr_t address,
 	int retval;
 
 	/* cortex_a handles unaligned memory access */
-	LOG_DEBUG("Writing memory at address " TARGET_ADDR_FMT "; size %" PRId32 "; count %" PRId32,
+	LOG_DEBUG("Writing memory at address " TARGET_ADDR_FMT "; size %" PRIu32 "; count %" PRIu32,
 		address, size, count);
 
 	/* memory writes bypass the caches, must flush before writing */
@@ -2620,7 +2681,7 @@ static int cortex_a_examine_first(struct target *target)
 
 	int i;
 	int retval = ERROR_OK;
-	uint32_t didr, cpuid, dbg_osreg;
+	uint32_t didr, cpuid, dbg_osreg, dbg_idpfr1;
 
 	/* Search for the APB-AP - it is needed for access to debug registers */
 	retval = dap_find_ap(swjdp, AP_TYPE_APB_AP, &armv7a->debug_ap);
@@ -2659,6 +2720,10 @@ static int cortex_a_examine_first(struct target *target)
 			  target->coreid, armv7a->debug_base);
 	} else
 		armv7a->debug_base = target->dbgbase;
+
+	if ((armv7a->debug_base & (1UL<<31)) == 0)
+		LOG_WARNING("Debug base address for target %s has bit 31 set to 0. Access to debug registers will likely fail!\n"
+			    "Please fix the target configuration.", target_name(target));
 
 	retval = mem_ap_read_atomic_u32(armv7a->debug_ap,
 			armv7a->debug_base + CPUDBG_DIDR, &didr);
@@ -2725,7 +2790,25 @@ static int cortex_a_examine_first(struct target *target)
 		}
 	}
 
-	armv7a->arm.core_type = ARM_MODE_MON;
+	retval = mem_ap_read_atomic_u32(armv7a->debug_ap,
+				 armv7a->debug_base + CPUDBG_ID_PFR1, &dbg_idpfr1);
+	if (retval != ERROR_OK)
+		return retval;
+
+	if (dbg_idpfr1 & 0x000000f0) {
+		LOG_DEBUG("target->coreid %" PRId32 " has security extensions",
+				target->coreid);
+		armv7a->arm.core_type = ARM_CORE_TYPE_SEC_EXT;
+	}
+	if (dbg_idpfr1 & 0x0000f000) {
+		LOG_DEBUG("target->coreid %" PRId32 " has virtualization extensions",
+				target->coreid);
+		/*
+		 * overwrite and simplify the checks.
+		 * virtualization extensions require implementation of security extension
+		 */
+		armv7a->arm.core_type = ARM_CORE_TYPE_VIRT_EXT;
+	}
 
 	/* Avoid recreating the registers cache */
 	if (!target_was_examined(target)) {
@@ -2877,6 +2960,7 @@ static void cortex_a_deinit_target(struct target *target)
 	}
 
 	free(cortex_a->brp_list);
+	arm_free_reg_cache(dpm->arm);
 	free(dpm->dbp);
 	free(dpm->dwp);
 	free(target->private_config);
